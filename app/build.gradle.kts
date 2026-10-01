@@ -23,24 +23,39 @@ android {
         applicationId = "com.example.budgetapp"
         minSdk = 26
         targetSdk = 36
-        versionCode = 104
-        versionName = "3.8.3"
+        versionCode = 105
+        versionName = "3.9.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     signingConfigs {
         create("release") {
-            if (keystoreProps.isNotEmpty()) {
-                storeFile = file(keystoreProps.getProperty("storeFile"))
-                storePassword = keystoreProps.getProperty("storePassword")
-                keyAlias = keystoreProps.getProperty("keyAlias")
-                keyPassword = keystoreProps.getProperty("keyPassword")
-            } else {
-                storeFile = file(System.getProperty("user.home") + "/.android/debug.keystore")
-                storePassword = "android"
-                keyAlias = "androiddebugkey"
-                keyPassword = "android"
+            // 三级来源，优先级从高到低：
+            //   1) keystore.properties（本机开发，已被 .gitignore 忽略）
+            //   2) 环境变量 TALLY_KEYSTORE_*（CI 用，值来自 GitHub Secrets）
+            //   3) 本机 debug 密钥（兜底；当前设备装的就是它签的，换密钥会导致
+            //      覆盖安装失败、必须卸载重装丢数据）
+            val envStore = System.getenv("TALLY_KEYSTORE_FILE")
+            when {
+                keystoreProps.isNotEmpty() -> {
+                    storeFile = file(keystoreProps.getProperty("storeFile"))
+                    storePassword = keystoreProps.getProperty("storePassword")
+                    keyAlias = keystoreProps.getProperty("keyAlias")
+                    keyPassword = keystoreProps.getProperty("keyPassword")
+                }
+                !envStore.isNullOrBlank() -> {
+                    storeFile = file(envStore)
+                    storePassword = System.getenv("TALLY_KEYSTORE_PASSWORD")
+                    keyAlias = System.getenv("TALLY_KEY_ALIAS")
+                    keyPassword = System.getenv("TALLY_KEY_PASSWORD")
+                }
+                else -> {
+                    storeFile = file(System.getProperty("user.home") + "/.android/debug.keystore")
+                    storePassword = "android"
+                    keyAlias = "androiddebugkey"
+                    keyPassword = "android"
+                }
             }
         }
     }
