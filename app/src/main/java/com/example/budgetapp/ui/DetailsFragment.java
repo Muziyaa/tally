@@ -81,6 +81,16 @@ public class DetailsFragment extends Fragment {
     private TextView tvStatisticsSummary;
     private DetailsAdapter adapter;
     private List<Transaction> allTransactions = new ArrayList<>();
+
+    /**
+     * 待打开的交易 id。
+     *
+     * 后台记账卡片点进来时由 MainActivity 设好，本页把列表铺好之后消费掉：
+     * 滚到那一行并直接打开它的编辑框。用静态字段而不是 Fragment 参数，是因为
+     * 目标是「App 已经在后台时点卡片」这条路径，那时 Fragment 已经建好了，
+     * 再补 arguments 不会重新触发 —— 一个待办标记反而更可靠。
+     */
+    public static long pendingOpenTxId = -1L;
     private List<AssetAccount> assetList = new ArrayList<>();
     private TextView tvDateRange;
 
@@ -765,6 +775,7 @@ public class DetailsFragment extends Fragment {
             if (list != null) {
                 // 🌟 修改点：将分页流替换为常规的 List 更新
                 adapter.setTransactions(list);
+                consumePendingOpenTx(list);
                 
                 // 更新统计信息
                 updateStatisticsSummary(list);
@@ -873,6 +884,39 @@ public class DetailsFragment extends Fragment {
         ssb.setSpan(new ForegroundColorSpan(colorBalance), start, ssb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
 
         tvStatisticsSummary.setText(ssb);
+    }
+
+    /**
+     * 有人点后台记账卡片指定了要看某一笔，就把那笔滚出来并打开编辑框。
+     *
+     * 时序上有个坑：列表是异步来的，本方法可能在数据还没到齐时就被调用。
+     * 所以在数据为空时**不能**清掉待办标记，否则这一次请求就永远丢了 ——
+     * 只有真的查过一遍、确定列表里没有那笔时才放弃。
+     */
+    private void consumePendingOpenTx(List<Transaction> shown) {
+        final long target = pendingOpenTxId;
+        if (target <= 0) return;
+        if (adapter == null || shown == null || shown.isEmpty()) return;   // 数据还没到，下次再说
+
+        int index = -1;
+        for (int i = 0; i < shown.size(); i++) {
+            if (shown.get(i).id == target) { index = i; break; }
+        }
+        pendingOpenTxId = -1L;   // 查过了，无论有没有都算处理过
+        if (index < 0) return;   // 不在当前筛选范围内（或已被撤销）
+
+        final int position = index;
+        if (recyclerView == null) return;
+        recyclerView.post(() -> {
+            try {
+                int p = Math.min(position, Math.max(0, adapter.getItemCount() - 1));
+                recyclerView.scrollToPosition(p);
+                Transaction t = shown.get(position);
+                showAddOrEditDialog(t,
+                        java.time.Instant.ofEpochMilli(t.date)
+                                .atZone(ZoneId.systemDefault()).toLocalDate());
+            } catch (Exception ignored) {}
+        });
     }
 
     private void showAddOrEditDialog(Transaction existingTransaction, LocalDate date) {

@@ -10,6 +10,11 @@
 
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
 
+    <!-- 普通保活模式：申请 Doze 白名单，避免长时间休眠被冻结而漏记 -->
+    <uses-permission
+        android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
+        tools:ignore="BatteryLife" />
+
     <uses-permission android:name="android.permission.INTERNET" />
 
     <application
@@ -185,6 +190,13 @@
         <activity android:name=".ui.UserNoticeActivity" />
 
         <activity android:name=".ui.PrivacyPolicyActivity" />
+
+        <!-- 保活设置：普通模式 / Root 模式切换、Root 检测与排障、守护模块安装与移除 -->
+        <activity
+            android:name=".ui.KeepAliveSettingsActivity"
+            android:exported="false"
+            android:label="保活设置"
+            android:screenOrientation="portrait" />
 
         <activity
             android:name=".ui.BudgetHistoryActivity"

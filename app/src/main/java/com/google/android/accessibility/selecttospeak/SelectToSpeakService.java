@@ -8,6 +8,7 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.ServiceInfo;
 import android.content.res.ColorStateList;
@@ -18,6 +19,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.os.ResultReceiver;
 import android.provider.Settings;
 import android.util.Log;
@@ -78,6 +80,69 @@ public class SelectToSpeakService extends AccessibilityService {
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private boolean isWindowShowing = false;
+
+    /**
+     * How often the confirm window re-checks that it is still really on screen.
+     */
+    private static final long GATE_CHECK_INTERVAL_MS = 30_000L;
+
+    /**
+     * Absolute upper bound on how long the confirm window may hold the scan gate.
+     *
+     * While the gate is held every scan is dropped, so a window nobody acts on silently costs
+     * real transactions. Three minutes is far longer than anyone needs to tap 保存/取消, and it
+     * bounds the loss instead of letting it run to the end of the session.
+     */
+    private static final long WINDOW_MAX_LIFETIME_MS = 3 * 60 * 1000L;
+
+    /** uptimeMillis when the current confirm window went up. */
+    private long windowShownAt = 0;
+
+    /** 后台记账提示卡片（非模态）。null 表示当前没有显示。 */
+    private View recordToastView = null;
+    private WindowManager recordToastWm = null;
+    private final Runnable recordToastDismiss = () -> hideRecordToast();
+
+    /** 卡片停留时长：够看清金额和时间，又不至于挡着别人。 */
+    private static final long RECORD_TOAST_MS = 4000L;
+
+    /** app_prefs 里的开关：是否显示顶部提示卡片，默认开启。 */
+    private static final String PREF_BG_TOAST = "bg_toast_enabled";
+
+    /** app_prefs 里的开关：静默记账（不弹确认框），默认开启。 */
+    private static final String PREF_SILENT_RECORD = "silent_record_enabled";
+
+    /** app_prefs 里的设置：提示方式 —— card（顶部卡片）/ notification（系统通知）/ both。 */
+    private static final String PREF_NOTIFY_STYLE = "record_notify_style";
+
+    /** 通知渠道：IMPORTANCE_HIGH 才会以「横幅」形式弹在屏幕顶部。 */
+    private static final String RECORD_CHANNEL_ID = "record_toast_v1";
+    private static final int RECORD_NOTIFY_ID = 0x7A11;
+    private static final String ACTION_UNDO_RECORD = "com.example.budgetapp.ACTION_UNDO_RECORD";
+
+    /** 点卡片要打开的那笔交易；-1 表示不指定。 */
+    public static final String EXTRA_OPEN_TX_ID = "open_tx_id";
+
+    /** 最近一次无障碍事件来自哪个包（只用于日志，帮助定位"记录有了但卡片没弹"）。 */
+    private String lastEventPackage = null;
+
+    /**
+     * 正在运行的服务实例。
+     *
+     * 只给设置页的「测试提示卡片」按钮用：那个按钮需要在**不记一笔账**的前提下，
+     * 单独验证卡片这条链路通不通，从而把"卡片坏了"和"识别没触发"两件事分开。
+     */
+    private static volatile SelectToSpeakService sInstance = null;
+
+    public static SelectToSpeakService getInstance() {
+        return sInstance;
+    }
+
+    /** 设置页的「测试提示卡片」入口。 */
+    public void runToastSelfTest() {
+        toastDiag("【自检】用户点了「测试提示卡片」");
+        showRecordToast(-1, 12.34, 0, "自检", "这是一条测试提示");
+    }
     private View windowRootView;
     private View keepAliveView;
     private long lastRecordTime = 0;
@@ -302,6 +367,18 @@ public class SelectToSpeakService extends AccessibilityService {
     @Override
     public void onServiceConnected() {
         super.onServiceConnected();
+        sInstance = this;
+        try {
+            IntentFilter f = new IntentFilter(ACTION_UNDO_RECORD);
+            if (Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(recordActionReceiver, f, Context.RECEIVER_NOT_EXPORTED);
+            } else {
+                registerReceiver(recordActionReceiver, f);
+            }
+            ensureRecordChannel();
+        } catch (Throwable t) {
+            Log.w("AutoTrackToast", "register record receiver failed: " + t);
+        }
         config = new AssistantConfig(this);
         KeywordManager.initDefaults(this);
 
@@ -318,6 +395,9 @@ public class SelectToSpeakService extends AccessibilityService {
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
+        if (event != null && event.getPackageName() != null) {
+            lastEventPackage = event.getPackageName().toString();
+        }
         if (event == null || event.getPackageName() == null) {
             return;
         }
@@ -570,10 +650,31 @@ public class SelectToSpeakService extends AccessibilityService {
         boolean isCurrencyEnabled = prefs.getBoolean("enable_currency", false);
         boolean isPhotoBackupEnabled = prefs.getBoolean("enable_photo_backup", false);
 
-        // 【修改点 A】：如果是后台直接记账（无悬浮窗权限），传入 transactionTime
-        if (!Settings.canDrawOverlays(this)) {
+        // 【修改点 A】：静默记账 —— 不弹确认框，直接入库。
+        //
+        // 两种进入方式：
+        //   1) 用户开了「静默记账」开关（此时悬浮窗权限仍然保留，卡片才有权限显示）；
+        //   2) 根本没有悬浮窗权限，那就只能静静地记，连卡片也显示不了。
+        boolean silentBySetting;
+        try {
+            // 默认开启：静默记账是这个版本的主推形态（顶部卡片负责告知与撤销），
+            // 不想要的人可以在「设置 → 保活设置」里关掉，关掉后回到确认框流程。
+            silentBySetting = getSharedPreferences("app_prefs", MODE_PRIVATE)
+                    .getBoolean(PREF_SILENT_RECORD, true);
+        } catch (Exception e) {
+            silentBySetting = false;
+        }
+        boolean canOverlay = Settings.canDrawOverlays(this);
+        // 这条日志能区分"走了静默路径"还是"走了确认框路径" —— 两者表现完全不同，
+        // 但用户看到的都只是"没有卡片"。
+        toastDiag("路径判定：静默开关=" + silentBySetting + " 悬浮窗权限=" + canOverlay
+                + " → " + ((!canOverlay || silentBySetting) ? "静默记账（应弹卡片）" : "弹确认框（不弹卡片）"));
+        if (!canOverlay || silentBySetting) {
             int finalAssetId = (matchedAssetId > 0) ? matchedAssetId : 0;
-            saveToDatabase(amount, type, category, null, note + " (后台)", "", finalAssetId, initialSymbol, "", transactionTime);
+            // 静默记账没有任何界面反馈，用户无从知道到底记没记上，所以这里补一张
+            // 非模态提示卡片（可关闭、可撤销、可点进 App 核对）。没有权限时它会自己跳过。
+            saveToDatabase(amount, type, category, null, note + " (后台)", "", finalAssetId, initialSymbol, "", transactionTime,
+                    null, -1, false, true, amount, type, category, note);
             return;
         }
 
@@ -861,11 +962,399 @@ public class SelectToSpeakService extends AccessibilityService {
             btnCancel.setOnClickListener(v -> closeWindow(windowManager, floatView));
             windowManager.addView(floatView, params);
 
+            // Self-healing guard for the "window never gets dismissed" case.
+            //
+            // isWindowShowing gates EVERY scan (see onAccessibilityEvent) and only closeWindow
+            // clears it. If the overlay is suppressed by the ROM, removed out-of-band, or just
+            // left sitting there, the flag would stay true for the rest of the session and
+            // auto-recording would stop with no log and no visible symptom. Checking that the
+            // view is still attached - plus an absolute cap - turns a permanent failure into a
+            // bounded pause.
+            windowShownAt = SystemClock.uptimeMillis();
+            final View guardedView = floatView;
+            handler.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    if (!isWindowShowing || windowRootView != guardedView) return;
+                    if (!guardedView.isAttachedToWindow()) {
+                        Log.w("AutoTrackService", "confirm window is no longer attached; releasing the scan gate");
+                        closeWindow(windowManager, guardedView);
+                        return;
+                    }
+                    if (SystemClock.uptimeMillis() - windowShownAt > WINDOW_MAX_LIFETIME_MS) {
+                        Log.w("AutoTrackService", "confirm window exceeded its maximum lifetime; releasing the scan gate");
+                        closeWindow(windowManager, guardedView);
+                        return;
+                    }
+                    handler.postDelayed(this, GATE_CHECK_INTERVAL_MS);
+                }
+            }, GATE_CHECK_INTERVAL_MS);
+
         } catch (Exception e) {
             Log.e("AutoTrackService", "Window show failed", e);
             isWindowShowing = false;
         }
     }
+    // ============================ 后台记账提示卡片 ============================
+    //
+    // 非模态：不抢焦点、不挡操作、4 秒后自己消失。只在「静默记账」之后出现，
+    // 也就是用户关掉了悬浮窗权限、记账完全无声无息的那种情况。
+    // 顺带提供唯一的反悔入口（撤销），否则静默记账记错了用户只能事后去列表里找。
+
+    private void showRecordToast(final int txId, double amount, int type, String category, String note) {
+        // 这条日志是给"记录有了但卡片没出现"这种情况准备的：它会说明卡片到底走到哪一步、
+        // 为什么没显示。用户抓 `adb logcat -s AutoTrackToast` 就能定位。
+        try {
+            SharedPreferences p = getSharedPreferences("app_prefs", MODE_PRIVATE);
+            if (!p.getBoolean(PREF_BG_TOAST, true)) {
+                toastDiag("跳过：开关「显示后台记账提示卡片」是关的");
+                return;
+            }
+            if (!Settings.canDrawOverlays(this)) {
+                // 没有悬浮窗权限 → 卡片这条路直接断了。按「通知 → Toast」继续降级：
+                // 通知不需要悬浮窗权限，功能还完整；只有通知也不行时才退到 Toast。
+                toastDiag("没有悬浮窗权限 —— 卡片不可用，降级为系统通知");
+                postRecordNotification(txId, amount, type, category, note);
+                return;
+            }
+        } catch (Exception e) {
+            toastDiag("跳过：读配置异常 " + e);
+            return;
+        }
+        toastDiag("提示方式=" + getNotifyStyleSafe() + " tx=" + txId + " type=" + type
+                + " amount=" + amount + " category=" + category + " note=" + note);
+        String st = getNotifyStyleSafe();
+        if ("notification".equals(st)) {
+            postRecordNotification(txId, amount, type, category, note);
+            return;
+        }
+        if ("both".equals(st)) {
+            postRecordNotification(txId, amount, type, category, note);
+        }
+
+        handler.post(() -> {
+            try {
+                hideRecordToast();
+
+                WindowManager wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+                ContextThemeWrapper themeContext = new ContextThemeWrapper(this, R.style.Theme_BudgetApp);
+                View card = LayoutInflater.from(themeContext).inflate(R.layout.window_record_toast, null);
+
+                WindowManager.LayoutParams params = new WindowManager.LayoutParams();
+                params.type = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                        ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                        : WindowManager.LayoutParams.TYPE_PHONE;
+                params.format = PixelFormat.TRANSLUCENT;
+                params.width = WindowManager.LayoutParams.MATCH_PARENT;
+                params.height = WindowManager.LayoutParams.WRAP_CONTENT;
+                params.gravity = Gravity.TOP;
+                // 顶到 y=0 会被状态栏压住一半，从状态栏下沿开始放。
+                params.y = statusBarHeightPx() + dpToPx(6);
+                // 非模态的关键：不聚焦（输入照常）、不独占触摸（卡片以外照常点）
+                params.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN;
+                params.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING;
+
+                TextView tvAmount = card.findViewById(R.id.tv_toast_amount);
+                TextView tvTime = card.findViewById(R.id.tv_toast_time);
+                TextView tvNote = card.findViewById(R.id.tv_toast_note);
+                View btnUndo = card.findViewById(R.id.btn_toast_undo);
+                View btnClose = card.findViewById(R.id.btn_toast_close);
+                View cardBody = card.findViewById(R.id.record_toast_card);
+
+                String symbol = "¥";
+                String sign = (type == 1) ? "+" : "-";
+                tvAmount.setText(sign + symbol + trimAmount(amount));
+                tvTime.setText(new SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(new Date()));
+
+                tvNote.setText(toastSubtitle(category, note));
+
+                btnClose.setOnClickListener(v -> hideRecordToast());
+                cardBody.setOnClickListener(v -> {
+                    hideRecordToast();
+                    openAppAtTransaction(txId);
+                });
+                btnUndo.setOnClickListener(v -> {
+                    hideRecordToast();
+                    undoTransaction(txId);
+                });
+
+                wm.addView(card, params);
+                recordToastView = card;
+                recordToastWm = wm;
+                toastDiag("addView 返回成功（前台=" + foregroundPackageHint() + "），正在确认是否真的可见…");
+
+                // 有些 ROM（小米/HyperOS 等）或某些页面会**静默丢弃**第三方悬浮窗：
+                // addView 不报错、也不抛异常，但窗口永远不会被布局 —— 用户什么都看不到。
+                // 光靠 addView 的返回值判断会误以为成功了，所以延迟看一眼真实宽度。
+                // 宽度为 0 = 没被布局 = 实际不可见 → 降级到系统通知（再不行才 Toast）。
+                handler.postDelayed(() -> {
+                    if (recordToastView != card) return;      // 已被新的替换，别再插手
+                    if (card.getWidth() > 0 && card.isShown()) {
+                        toastDiag("卡片已确认可见 w=" + card.getWidth());
+                        return;
+                    }
+                    toastDiag("卡片加进去了但不可见（w=" + card.getWidth() + "）→ 降级为系统通知");
+                    hideRecordToast();
+                    postRecordNotification(txId, amount, type, category, note);
+                }, 400);
+
+
+                handler.removeCallbacks(recordToastDismiss);
+                handler.postDelayed(recordToastDismiss, RECORD_TOAST_MS);
+            } catch (Exception e) {
+                toastDiag("addView 失败：" + e + " —— 已改用系统 Toast 提示");
+                Log.e("AutoTrackToast", "addView failed", e);
+                recordToastView = null;
+                recordToastWm = null;
+                showFallbackToast(amount, type, category);
+            }
+        });
+    }
+
+    /**
+     * 卡片相关的诊断，同时写两个地方：
+     *   - logcat（tag AutoTrackToast，能用 adb 的人直接看）
+     *   - App 内的「自动记账适配日志」页（不能用 adb 的人点「复制」发出来）
+     *
+     * 这是为了定位"记录有了但卡片没出现"这类问题 —— 用户看不到任何界面提示，
+     * 只能靠日志说明它走到了哪一步。
+     */
+    private void toastDiag(String msg) {
+        Log.i("AutoTrackToast", msg);
+        try {
+            com.example.budgetapp.util.AutoTrackLogManager.addLog(
+                    lastEventPackage == null ? "com.example.budgetapp" : lastEventPackage,
+                    "【卡片】" + msg);
+            com.example.budgetapp.util.AutoTrackLogManager.saveLogsToDisk(this);
+        } catch (Throwable ignored) {}
+    }
+
+    /** 仅用于日志：最近一次无障碍事件来自哪个包。 */
+    private String foregroundPackageHint() {
+        try {
+            return lastEventPackage == null ? "?" : lastEventPackage;
+        } catch (Throwable t) {
+            return "?";
+        }
+    }
+
+    // ==================== 系统通知形式的记账提示 ====================
+    //
+    // 为什么需要它：部分 ROM（小米/HyperOS 等）和部分支付页面会拦截第三方悬浮窗，
+    // 使顶部卡片"加进去了但看不见"。系统通知由 SystemUI 渲染，不受这类拦截影响，
+    // 而且用 IMPORTANCE_HIGH 会以横幅形式出现在屏幕顶部 —— 位置和观感与卡片一致，
+    // 同样能放「撤销」按钮、同样能点进 App 定位到那笔账。
+
+    /** 读取提示方式，异常时按「通知」处理（通知到处都能用）。 */
+    private String getNotifyStyleSafe() {
+        try {
+            String v = getSharedPreferences("app_prefs", MODE_PRIVATE)
+                    .getString(PREF_NOTIFY_STYLE, "notification");
+            if ("card".equals(v) || "notification".equals(v) || "both".equals(v)) return v;
+        } catch (Throwable ignored) {}
+        return "notification";
+    }
+
+    private void ensureRecordChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
+        NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+        if (nm == null) return;
+        if (nm.getNotificationChannel(RECORD_CHANNEL_ID) != null) return;
+        NotificationChannel ch = new NotificationChannel(RECORD_CHANNEL_ID, "记账提示",
+                NotificationManager.IMPORTANCE_HIGH);
+        ch.setDescription("记账成功后提示金额和时间，可撤销、可点进 App 核对");
+        ch.enableVibration(false);
+        ch.setSound(null, null);
+        nm.createNotificationChannel(ch);
+    }
+
+    private void postRecordNotification(int txId, double amount, int type, String category, String note) {
+        handler.post(() -> {
+            try {
+                NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+                if (nm == null) return;
+                if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                        != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                    toastDiag("通知权限没给，无法用通知提示");
+                    showFallbackToast(amount, type, category);
+                    return;
+                }
+                ensureRecordChannel();
+
+                String symbol = "¥";
+                String sign = (type == 1) ? "+" : "-";
+                String title = sign + symbol + trimAmount(amount);
+                String sub = toastSubtitle(category, note);
+
+                Intent open = new Intent(this, com.example.budgetapp.MainActivity.class);
+                open.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP
+                        | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                open.putExtra(EXTRA_OPEN_TX_ID, (long) txId);
+                PendingIntent contentPi = PendingIntent.getActivity(this, txId, open,
+                        PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+
+                Intent undo = new Intent(ACTION_UNDO_RECORD);
+                undo.setPackage(getPackageName());
+                undo.putExtra("tx_id", txId);
+                PendingIntent undoPi = PendingIntent.getBroadcast(this, txId, undo,
+                        PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+
+                Notification.Builder b = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                        ? new Notification.Builder(this, RECORD_CHANNEL_ID)
+                        : new Notification.Builder(this);
+                b.setSmallIcon(android.R.drawable.ic_menu_save)
+                        .setContentTitle(title)
+                        .setContentText(sub)
+                        .setSubText(new SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
+                                .format(new Date()))
+                        .setContentIntent(contentPi)
+                        .setAutoCancel(true)
+                        .setTimeoutAfter(10000L)
+                        .addAction(new Notification.Action.Builder(
+                                android.R.drawable.ic_menu_revert, "撤销", undoPi).build());
+                nm.notify(RECORD_NOTIFY_ID, b.build());
+                toastDiag("已发出系统通知提示（撤销/点击跳转都可用）");
+            } catch (Throwable t) {
+                toastDiag("发通知失败：" + t);
+                showFallbackToast(amount, type, category);
+            }
+        });
+    }
+
+    /** 通知里的「撤销」按钮走这里。 */
+    private final android.content.BroadcastReceiver recordActionReceiver =
+            new android.content.BroadcastReceiver() {
+        @Override
+        public void onReceive(android.content.Context context, Intent intent) {
+            if (intent == null) return;
+            if (ACTION_UNDO_RECORD.equals(intent.getAction())) {
+                int id = intent.getIntExtra("tx_id", -1);
+                toastDiag("通知里点了「撤销」tx=" + id);
+                if (id > 0) {
+                    try {
+                        NotificationManager nm =
+                                (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+                        if (nm != null) nm.cancel(RECORD_NOTIFY_ID);
+                    } catch (Throwable ignored) {}
+                    undoTransaction(id);
+                }
+            }
+        }
+    };
+
+    /**
+     * 卡片显示不出来时的兜底：系统 Toast。
+     *
+     * Toast 由系统进程渲染，不需要悬浮窗权限，也不受"禁止第三方悬浮窗"影响，
+     * 所以它是最后一道能确保用户知道"已经记上了一笔"的手段。
+     * 代价是没有按钮（不能撤销、不能点进 App），只能看。
+     */
+    private void showFallbackToast(double amount, int type, String category) {
+        handler.post(() -> {
+            try {
+                String symbol = "¥";
+                String sign = (type == 1) ? "+" : "-";
+                String cat = (category == null || category.isEmpty()) ? "" : " · " + category;
+                Toast.makeText(this, "已记账 " + sign + symbol + trimAmount(amount) + cat,
+                        Toast.LENGTH_LONG).show();
+            } catch (Throwable ignored) {}
+        });
+    }
+
+    private void hideRecordToast() {
+        handler.removeCallbacks(recordToastDismiss);
+        View v = recordToastView;
+        WindowManager wm = recordToastWm;
+        recordToastView = null;
+        recordToastWm = null;
+        if (v != null && wm != null) {
+            try { wm.removeView(v); } catch (Exception ignored) {}
+        }
+    }
+
+    /** 金额统一两位小数：钱数写成 12.00 比 12 更容易一眼确认。 */
+    private String trimAmount(double amount) {
+        return String.format(Locale.getDefault(), "%.2f", amount);
+    }
+
+    private int dpToPx(int dp) {
+        return Math.round(dp * getResources().getDisplayMetrics().density);
+    }
+
+    private int statusBarHeightPx() {
+        int id = getResources().getIdentifier("status_bar_height", "dimen", "android");
+        return id > 0 ? getResources().getDimensionPixelSize(id) : dpToPx(24);
+    }
+
+    /**
+     * 卡片第二行的文字：分类 + 备注。
+     *
+     * 备注里往往已经带了 "MM-dd HH:mm " 前缀（就是页面上的记录标识），而卡片第一行
+     * 已经单独显示了时间，所以这里把它去掉，免得同一张卡上出现两次时间。
+     */
+    private String toastSubtitle(String category, String note) {
+        String clean = note == null ? "" : note.trim();
+        clean = clean.replaceFirst("^\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}\\s*", "");
+        StringBuilder sb = new StringBuilder();
+        if (category != null && !category.trim().isEmpty()) sb.append(category.trim());
+        if (!clean.isEmpty()) {
+            if (sb.length() > 0) sb.append(" · ");
+            sb.append(clean);
+        }
+        return sb.length() == 0 ? "已自动记账" : sb.toString();
+    }
+
+    /** 点卡片：把 App 叫到前台，并定位到刚记的那笔。 */
+    private void openAppAtTransaction(int txId) {
+        try {
+            Intent i = new Intent(this, com.example.budgetapp.MainActivity.class);
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            // 必须是 long：接收方用 getLongExtra 读，写成 int 会静默读回默认值。
+            i.putExtra(EXTRA_OPEN_TX_ID, (long) txId);
+            startActivity(i);
+        } catch (Exception e) {
+            Log.e("AutoTrackService", "open app failed", e);
+        }
+    }
+
+    /**
+     * 撤销刚记的那笔：删掉记录，并把当初为此调整过的资产金额反向调回去。
+     *
+     * 自动记账走的是「无对方资产」的路径（targetObject=null / liabilityLoanType=-1），
+     * 所以这里只需要还原己方资产那一处，和 saveToDatabase() 里的逻辑严格对称。
+     */
+    private void undoTransaction(final int txId) {
+        AppDatabase.databaseWriteExecutor.execute(() -> {
+            try {
+                AppDatabase db = AppDatabase.getDatabase(getApplicationContext());
+                Transaction t = dao.getByIdSync(txId);
+                if (t == null) return;
+
+                if (t.assetId != 0) {
+                    AssetAccount asset = db.assetAccountDao().getAssetByIdSync(t.assetId);
+                    if (asset != null) {
+                        if (asset.type == 0) {
+                            if (t.type == 1) asset.amount -= t.amount; else asset.amount += t.amount;
+                        } else if (asset.type == 1 || asset.type == 2) {
+                            if (t.type == 1) asset.amount += t.amount; else asset.amount -= t.amount;
+                        }
+                        db.assetAccountDao().update(asset);
+                    }
+                }
+
+                dao.deleteById(txId);
+                com.example.budgetapp.BackupManager.triggerAutoUploadIfEnabled(getApplicationContext());
+
+                handler.post(() -> Toast.makeText(this, "已撤销", Toast.LENGTH_SHORT).show());
+            } catch (Exception e) {
+                Log.e("AutoTrackService", "undo failed", e);
+            }
+        });
+    }
+    // ========================================================================
+
     private void closeWindow(WindowManager wm, View view) {
         try { wm.removeView(view); } catch (Exception e) {}
         finally {
@@ -1064,6 +1553,11 @@ public class SelectToSpeakService extends AccessibilityService {
     // 2. 修改现有的 saveToDatabase 方法（增加 long transactionTime 参数）
     // 核心入库方法
     private void saveToDatabase(double amount, int type, String category, String subCategory, String note, String remark, int assetId, String currencySymbol, String photoPath, long transactionTime, String targetObject, int liabilityLoanType, boolean excludeFromBudget) {
+        saveToDatabase(amount, type, category, subCategory, note, remark, assetId, currencySymbol, photoPath, transactionTime,
+                targetObject, liabilityLoanType, excludeFromBudget, false, 0, 0, null, null);
+    }
+
+    private void saveToDatabase(double amount, int type, String category, String subCategory, String note, String remark, int assetId, String currencySymbol, String photoPath, long transactionTime, String targetObject, int liabilityLoanType, boolean excludeFromBudget, boolean notifyToast, double toastAmount, int toastType, String toastCategory, String toastNote) {
         AppDatabase.databaseWriteExecutor.execute(() -> {
             AppDatabase db = AppDatabase.getDatabase(getApplicationContext());
 
@@ -1079,7 +1573,10 @@ public class SelectToSpeakService extends AccessibilityService {
             t.currencySymbol = currencySymbol;
             t.photoPath = photoPath;
             t.targetObject = targetObject;
-            dao.insert(t);
+            final long newRowId = dao.insert(t);
+        if (notifyToast) {
+            showRecordToast((int) newRowId, toastAmount, toastType, toastCategory, toastNote);
+        }
 
             // 1. 同步目标资产(如存在)
             if (targetObject != null && !targetObject.isEmpty() && liabilityLoanType != -1) {
@@ -1406,6 +1903,76 @@ public class SelectToSpeakService extends AccessibilityService {
     }
 
     /**
+     * 节点文本：优先 Text，其次 contentDescription，均 trim。
+     */
+    private String nodeContent(AccessibilityNodeInfo node) {
+        if (node == null) return "";
+        CharSequence text = node.getText();
+        if (text != null && text.toString().trim().length() > 0) return text.toString().trim();
+        CharSequence desc = node.getContentDescription();
+        if (desc != null) return desc.toString().trim();
+        return "";
+    }
+
+    /**
+     * 解析 "¥1,234.56" / "1.00" 为金额，非纯数字返回 null。
+     *
+     * 这里必须严格：一旦 amountAt() 开始看相邻节点，宽松解析就会把旁边任意一个标签
+     * （编号、时间、数量）当成金额。
+     */
+    private Double parseAmountString(String raw) {
+        if (raw == null) return null;
+        String cleaned = raw.replace("¥", "").replace("￥", "").replace(",", "").replace(" ", "").trim();
+        if (cleaned.isEmpty()) return null;
+        // Refund / reversal rows are shown as "-12.34". The sign carries the direction, which
+        // the individual handlers decide for themselves, so only the magnitude is returned here.
+        if (cleaned.startsWith("-") || cleaned.startsWith("+")) cleaned = cleaned.substring(1);
+        if (cleaned.isEmpty()) return null;
+        if (!cleaned.matches("\\d+(?:\\.\\d+)?")) return null;
+        try {
+            double value = Double.parseDouble(cleaned);
+            return value > 0 ? value : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * 2020..2035 的整数几乎必然是年份而不是金额。
+     *
+     * 通用识别路径早就在做这个过滤（"过滤掉异常数值和年份"），但各 App 专用 handler 漏了；
+     * 结果是页面上任何 "¥2026" 都会被记成一笔 2026 元的账。
+     */
+    private boolean looksLikeYear(double value) {
+        return value >= 2020 && value <= 2035 && value == Math.floor(value);
+    }
+
+    /**
+     * 取展平列表中第 index 个节点所承载的金额，**容忍货币符号自己是一个节点**。
+     *
+     * 真实支付页（例如微信「支付成功」）经常把小字号的 "¥" 单独渲染成一个节点，数字在下一个
+     * 节点里。如果只认「同一个节点里既有符号又有数字」，这类页面就会永远匹配不上——线上微信
+     * 支付成功页记不上账，就是这个原因。所以符号单独成节点时，再往后面几个节点找数字。
+     *
+     * @return 金额；该位置不是金额时返回 -1。
+     */
+    private double amountAt(List<AccessibilityNodeInfo> nodes, int index) {
+        if (nodes == null || index < 0 || index >= nodes.size()) return -1;
+        String content = nodeContent(nodes.get(index));
+        if (content.isEmpty() || (!content.contains("¥") && !content.contains("￥"))) return -1;
+
+        Double direct = parseAmountString(content);
+        if (direct != null && !looksLikeYear(direct)) return direct;
+
+        // 符号单独成节点：数字几乎必定紧跟在后面
+        for (int j = index + 1; j < Math.min(index + 3, nodes.size()); j++) {
+            Double next = parseAmountString(nodeContent(nodes.get(j)));
+            if (next != null && !looksLikeYear(next)) return next;
+        }
+        return -1;
+    }
+
+    /**
      * 专门适配微信红包领取详情页
      * 识别“已存入零钱”特征并自动记账，分类自动设为“红包”
      */
@@ -1519,17 +2086,10 @@ public class SelectToSpeakService extends AccessibilityService {
                 }
             }
 
-            // 3. 提取金额（兼容日志中的全角 ￥ 和半角 ¥）
-            if (text.contains("¥") || text.contains("￥")) {
-                try {
-                    String cleanAmount = text.replace("¥", "").replace("￥", "").replace(",", "").trim();
-                    double parsedAmount = Double.parseDouble(cleanAmount);
-                    if (parsedAmount > 0) {
-                        amount = parsedAmount;
-                    }
-                } catch (Exception e) {
-                    // 解析失败则忽略，继续寻找下一个
-                }
+            // 3. 提取金额（兼容日志中的全角 ￥ 和半角 ¥；也兼容符号单独成一个节点的情况）
+            double parsedAmount = amountAt(allNodes, i);
+            if (parsedAmount > 0) {
+                amount = parsedAmount;
             }
         }
 
@@ -1593,16 +2153,11 @@ public class SelectToSpeakService extends AccessibilityService {
                 pendingInfo = content;
             }
 
-            // 2. 提取金额（格式通常为 ￥0.01）
-            if ((content.contains("￥") || content.contains("¥")) && amount == -1) {
-                try {
-                    String cleanAmount = content.replace("￥", "").replace("¥", "").replace(",", "").trim();
-                    double parsed = Double.parseDouble(cleanAmount);
-                    if (parsed > 0) {
-                        amount = parsed;
-                    }
-                } catch (Exception e) {
-                    // 解析失败继续寻找
+            // 2. 提取金额（格式通常为 ￥0.01；也兼容符号单独成一个节点）
+            if (amount == -1) {
+                double parsed = amountAt(allNodes, i);
+                if (parsed > 0) {
+                    amount = parsed;
                 }
             }
         }
@@ -1880,26 +2435,17 @@ public class SelectToSpeakService extends AccessibilityService {
                 }
             }
 
-            // 3. 提取金额和商户名
-            if (text.contains("￥") || text.contains("¥")) {
-                try {
-                    String cleanAmount = text.replace("￥", "").replace("¥", "").replace(",", "").trim();
-                    double parsedAmount = Double.parseDouble(cleanAmount);
+            // 3. 提取金额和商户名（也兼容符号单独成一个节点）
+            double parsedAmount = amountAt(allNodes, i);
+            if (parsedAmount > 0 && amount == -1) {
+                amount = parsedAmount;
 
-                    // 确保金额合法，并且只抓取一次
-                    if (parsedAmount > 0 && amount == -1) {
-                        amount = parsedAmount;
-
-                        // 4. 商户名（或交易标题）通常在金额的上一个节点
-                        if (i > 0) {
-                            AccessibilityNodeInfo prevNode = allNodes.get(i - 1);
-                            if (prevNode.getText() != null) {
-                                merchantInfo = prevNode.getText().toString().trim();
-                            }
-                        }
+                // 4. 商户名（或交易标题）通常在金额的上一个节点
+                if (i > 0) {
+                    AccessibilityNodeInfo prevNode = allNodes.get(i - 1);
+                    if (prevNode.getText() != null) {
+                        merchantInfo = prevNode.getText().toString().trim();
                     }
-                } catch (Exception e) {
-                    // 解析失败忽略
                 }
             }
         }
@@ -1969,18 +2515,10 @@ public class SelectToSpeakService extends AccessibilityService {
                 hasWeChatRedPacket = true;
             }
 
-            // 3. 独立提取金额：支持从 Text 和 Desc 中抓取 ￥ 或 ¥
-            if (text.startsWith("￥") || text.startsWith("¥") || desc.startsWith("￥") || desc.startsWith("¥")) {
-                try {
-                    String cleanAmount = !text.isEmpty() ? text : desc;
-                    cleanAmount = cleanAmount.replace("￥", "").replace("¥", "").trim();
-                    double parsed = Double.parseDouble(cleanAmount);
-                    if (parsed > 0 && amount == -1) {
-                        amount = parsed;
-                    }
-                } catch (Exception e) {
-                    // 解析失败忽略
-                }
+            // 3. 独立提取金额：支持从 Text 和 Desc 中抓取 ￥ 或 ¥（也兼容符号单独成一个节点）
+            double parsed = amountAt(allNodes, i);
+            if (parsed > 0 && amount == -1) {
+                amount = parsed;
             }
 
             // 4. 【核心优化】：提取付款方式（如 "零钱" 或 "中国银行储蓄卡"）
@@ -2913,16 +3451,14 @@ public class SelectToSpeakService extends AccessibilityService {
                 isPaySuccessPage = true;
             }
 
-            // 2. 提取金额（寻找带有 ￥ 或 ¥ 的节点）
+            // 2. 提取金额（寻找带有 ￥ 或 ¥ 的节点；也兼容符号单独成一个节点）
             // 【过滤干扰】：排除掉包含"原价"、"优惠"的节点，只抓取真正的实付金额
-            if ((content.contains("￥") || content.contains("¥")) && !content.contains("原价") && !content.contains("优惠")) {
-                try {
-                    String cleanAmount = content.replace("￥", "").replace("¥", "").replace(",", "").trim();
-                    double parsedAmount = Double.parseDouble(cleanAmount);
+            if (!content.contains("原价") && !content.contains("优惠")) {
+                double parsedAmount = amountAt(allNodes, i);
 
-                    // 确保金额有效，且只抓取第一次出现的有效金额
-                    if (parsedAmount > 0 && amount == -1) {
-                        amount = parsedAmount;
+                // 确保金额有效，且只抓取第一次出现的有效金额
+                if (parsedAmount > 0 && amount == -1) {
+                    amount = parsedAmount;
 
                         // 3. 提取商户名（中国移动）
                         // 【核心修复】：向上倒序遍历，跨过所有不可见的排版空节点，寻找真正的商户名称
@@ -2939,9 +3475,6 @@ public class SelectToSpeakService extends AccessibilityService {
                             }
                         }
                     }
-                } catch (Exception e) {
-                    // 解析失败忽略
-                }
             }
         }
 
@@ -3339,12 +3872,12 @@ public class SelectToSpeakService extends AccessibilityService {
                 isTransferReceived = true;
             }
 
-            // 2. 提取金额 (如：¥12.00)
-            if ((content.startsWith("¥") || content.startsWith("￥")) && amount == -1) {
-                try {
-                    String cleanAmount = content.replace("¥", "").replace("￥", "").replace(",", "").trim();
-                    amount = Double.parseDouble(cleanAmount);
-                } catch (Exception e) {}
+            // 2. 提取金额 (如：¥12.00；也兼容符号单独成一个节点)
+            if (amount == -1) {
+                double parsed = amountAt(allNodes, i);
+                if (parsed > 0) {
+                    amount = parsed;
+                }
             }
 
             // 3. 提取转账说明 (如：捐赠支持)
@@ -3456,11 +3989,11 @@ public class SelectToSpeakService extends AccessibilityService {
                 isPaySuccess = true;
             }
 
-            // 2. 提取实付金额（锁定第一个带有 ¥ 或 ￥ 的节点，避开负数）
-            if ((content.contains("¥") || content.contains("￥")) && !content.contains("-") && !content.contains("优惠") && amount == -1) {
-                try {
-                    String cleanAmount = content.replace("¥", "").replace("￥", "").replace(",", "").trim();
-                    amount = Double.parseDouble(cleanAmount);
+            // 2. 提取实付金额（锁定第一个带有 ¥ 或 ￥ 的节点，避开负数；也兼容符号单独成一个节点）
+            if (!content.contains("-") && !content.contains("优惠") && amount == -1) {
+                double parsedAmount = amountAt(allNodes, i);
+                if (parsedAmount > 0) {
+                    amount = parsedAmount;
 
                     // 3. 顺藤摸瓜提取商户名 (商户名通常紧挨在金额的上方一个节点)
                     if (i > 0) {
@@ -3474,8 +4007,6 @@ public class SelectToSpeakService extends AccessibilityService {
                             merchantName = prevContent;
                         }
                     }
-                } catch (Exception e) {
-                    // 解析失败忽略
                 }
             }
 

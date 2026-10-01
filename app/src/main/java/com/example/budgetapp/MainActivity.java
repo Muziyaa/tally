@@ -153,6 +153,19 @@ public class MainActivity extends AppCompatActivity {
 
         setContentView(R.layout.activity_main);
 
+        // 守护兜底：Magisk 的 service.sh 每次开机只跑一次，守护被杀后没人拉它回来
+        // （模块自带的看护进程也可能一起被杀）。App 启动时顺手补一刀，幂等。
+        //
+        // 只在用户选了 Root 保活模式时才做：这一步会执行 su，而第一次启动时用户还没
+        // 选模式，抢在引导之前弹 Magisk 授权框会让人莫名其妙。普通模式本来也不该碰 root。
+        if (com.example.budgetapp.keepalive.KeepAliveMode.isRootMode(this)) {
+            new Thread(() -> {
+                try {
+                    com.example.budgetapp.keepalive.GuardInstaller.startIfNeeded();
+                } catch (Throwable ignored) {}
+            }, "guard-supervise").start();
+        }
+
         financeViewModel = new ViewModelProvider(this).get(FinanceViewModel.class);
         
         financeViewModel.getAllTransactions().observe(this, transactions -> {
@@ -195,6 +208,14 @@ public class MainActivity extends AppCompatActivity {
             NavController navController = navHostFragment.getNavController();
             NavigationUI.setupWithNavController(bottomNav, navController);
 
+            // 后台记账提示卡片点进来时，会带上刚记的那笔的 id：
+            // 直接去「明细」并让 DetailsFragment 打开它的编辑框，用户少找一步。
+            long openTxId = getIntent().getLongExtra(
+                    com.google.android.accessibility.selecttospeak.SelectToSpeakService.EXTRA_OPEN_TX_ID, -1L);
+            if (openTxId > 0) {
+                com.example.budgetapp.ui.DetailsFragment.pendingOpenTxId = openTxId;
+            }
+
             // 【新增】读取默认页面设置并跳转
             int defaultPage = prefs.getInt("default_page", 0); // 0 = 记账
             int targetNavId = R.id.nav_record; // 默认记账页面
@@ -217,6 +238,11 @@ public class MainActivity extends AppCompatActivity {
                     break;
             }
             
+            // 指定了要看某一笔时，「明细」优先于默认页面设置
+            if (openTxId > 0) {
+                targetNavId = R.id.nav_details;
+            }
+
             // 如果不是默认的记账页面，则跳转到指定页面
             if (targetNavId != R.id.nav_record) {
                 navController.navigate(targetNavId);
@@ -290,6 +316,23 @@ public class MainActivity extends AppCompatActivity {
         }
 
         checkPermissions();
+
+        // Android 13+ 的通知需要运行时授权。记账提示默认用系统通知横幅，
+        // 没这个权限就退化成普通 Toast（没有撤销按钮），所以这里主动要一次。
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= 33
+                    && checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                       != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 0x5101);
+            }
+        } catch (Throwable ignored) {}
+
+        // 首次启动依次说明两件事（不叠加显示）：
+        //   1) 这个版本默认开了哪些东西（静默记账、提示卡片、三个系统权限）；
+        //   2) 保活方式选哪种。
+        // 顺序不能反：选 Root 会跳到保活设置页，排在它后面的弹窗会被冲掉。
+        com.example.budgetapp.keepalive.DefaultsNotice.showIfNeeded(this,
+                () -> com.example.budgetapp.keepalive.KeepAliveOnboarding.showIfNeeded(this, false));
     }
 
     // 【修改】应用自定义背景（完美保留原有透明度适配逻辑，仅新增日/夜双图片判断）
@@ -386,7 +429,11 @@ public class MainActivity extends AppCompatActivity {
 //                    "为了监听微信/支付宝的退款通知，请授予‘通知使用权’。",
 //                    Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS);
 //        }
-        else if (config.isEnabled() && !Settings.canDrawOverlays(this)) {
+        // Not a missing permission when the user deliberately chose silent (background)
+        // recording, or asked not to be reminded: nagging then is pure noise.
+        else if (config.isEnabled() && !Settings.canDrawOverlays(this)
+                && !com.example.budgetapp.keepalive.PermissionAutomation
+                        .shouldSuppressOverlayNag(this)) {
             showPermissionDialog("开启悬浮窗权限",
                     "为了在记账时显示确认弹窗，请授予‘显示在其他应用上层’权限。",
                     Settings.ACTION_MANAGE_OVERLAY_PERMISSION);
@@ -481,6 +528,23 @@ public class MainActivity extends AppCompatActivity {
                     }
                 })
                 .show();
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        // 卡片可能是在 App 已经在后台时点的，这时不会重走 onCreate
+        long openTxId = intent.getLongExtra(
+                com.google.android.accessibility.selecttospeak.SelectToSpeakService.EXTRA_OPEN_TX_ID, -1L);
+        if (openTxId > 0) {
+            com.example.budgetapp.ui.DetailsFragment.pendingOpenTxId = openTxId;
+            NavHostFragment navHostFragment = (NavHostFragment) getSupportFragmentManager()
+                    .findFragmentById(R.id.nav_host_fragment);
+            if (navHostFragment != null) {
+                navHostFragment.getNavController().navigate(R.id.nav_details);
+            }
+        }
     }
 
     @Override

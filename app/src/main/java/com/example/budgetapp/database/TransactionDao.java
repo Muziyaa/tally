@@ -11,11 +11,21 @@ import java.util.List;
 
 @Dao
 public interface TransactionDao {
+    /**
+     * Returns the new row id so callers can refer back to the row they just wrote - the
+     * accessibility service needs that for the "撤销" affordance on its background-record toast.
+     */
     @Insert
-    void insert(Transaction transaction);
+    long insert(Transaction transaction);
 
     @Delete
     void delete(Transaction transaction);
+
+    @Query("DELETE FROM transactions WHERE id = :id")
+    void deleteById(int id);
+
+    @Query("SELECT * FROM transactions WHERE id = :id")
+    Transaction getByIdSync(int id);
 
     @Update
     void update(Transaction transaction);

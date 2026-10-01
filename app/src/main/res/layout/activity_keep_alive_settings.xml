@@ -1,0 +1,543 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="保活设置"
+            android:textSize="22sp"
+            android:textStyle="bold"
+            android:textColor="?android:attr/textColorPrimary" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Tally 依赖无障碍服务自动记账。部分系统会自动关闭无障碍，导致漏记。选择一种保活方式。"
+            android:textSize="13sp"
+            android:textColor="?android:attr/textColorSecondary" />
+
+        <!-- ============ 模式选择 ============ -->
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="保活模式"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:textColor="?android:attr/textColorPrimary" />
+
+        <RadioGroup
+            android:id="@+id/rg_keepalive_mode"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:orientation="vertical">
+
+            <RadioButton
+                android:id="@+id/rb_mode_normal"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="普通模式"
+                android:textSize="15sp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="32dp"
+                android:layout_marginBottom="8dp"
+                android:text="不需要 Root。加入电池优化白名单，并按提示关闭系统的后台限制。无法对抗系统的强制清理。"
+                android:textSize="12sp"
+                android:textColor="?android:attr/textColorSecondary" />
+
+            <RadioButton
+                android:id="@+id/rb_mode_root"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Root 保活模式（推荐）"
+                android:textSize="15sp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="32dp"
+                android:text="需要 Root。安装一个开机自启的守护，一旦发现无障碍被系统关闭就自动恢复，无需重启、不额外耗电。"
+                android:textSize="12sp"
+                android:textColor="?android:attr/textColorSecondary" />
+        </RadioGroup>
+
+        <!-- ============ 无障碍状态 ============ -->
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="20dp"
+            android:background="#1F888888" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="无障碍状态"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:textColor="?android:attr/textColorPrimary" />
+
+        <TextView
+            android:id="@+id/tv_a11y_status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:textSize="14sp"
+            android:textColor="?android:attr/textColorPrimary" />
+
+        <TextView
+            android:id="@+id/tv_a11y_hint"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:padding="12dp"
+            android:background="#14888888"
+            android:textSize="12sp"
+            android:textColor="?android:attr/textColorPrimary"
+            android:visibility="gone" />
+
+        <Button
+            android:id="@+id/btn_open_a11y_settings"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="打开系统无障碍设置" />
+
+        <!-- ============ Root 状态 ============ -->
+
+        <LinearLayout
+            android:id="@+id/group_root"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:orientation="vertical">
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:background="#1F888888" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="Root 状态"
+                android:textSize="16sp"
+                android:textStyle="bold"
+                android:textColor="?android:attr/textColorPrimary" />
+
+            <TextView
+                android:id="@+id/tv_root_status"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="尚未检测"
+                android:textSize="15sp"
+                android:textColor="?android:attr/textColorPrimary" />
+
+            <TextView
+                android:id="@+id/tv_root_solution"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:textSize="12sp"
+                android:textColor="?android:attr/textColorSecondary" />
+
+            <TextView
+                android:id="@+id/tv_root_explanation"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:textSize="13sp"
+                android:textColor="?android:attr/textColorSecondary" />
+
+            <TextView
+                android:id="@+id/tv_root_fix"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:padding="12dp"
+                android:background="#14888888"
+                android:textSize="13sp"
+                android:textColor="?android:attr/textColorPrimary" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btn_root_redetect"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="重新检测" />
+
+                <Button
+                    android:id="@+id/btn_copy_report"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginStart="8dp"
+                    android:text="复制诊断报告" />
+            </LinearLayout>
+
+            <Button
+                android:id="@+id/btn_root_install"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="启用 Root 保活" />
+
+            <Button
+                android:id="@+id/btn_root_remove"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="移除保活模块" />
+        </LinearLayout>
+
+        <!-- ============ 普通模式：电池优化 ============ -->
+
+        <LinearLayout
+            android:id="@+id/group_normal"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:orientation="vertical">
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:background="#1F888888" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="电池优化白名单"
+                android:textSize="16sp"
+                android:textStyle="bold"
+                android:textColor="?android:attr/textColorPrimary" />
+
+            <TextView
+                android:id="@+id/tv_battery_status"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:textSize="14sp"
+                android:textColor="?android:attr/textColorPrimary" />
+
+            <Button
+                android:id="@+id/btn_battery_request"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="申请忽略电池优化" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="系统后台限制（需手动设置）"
+                android:textSize="16sp"
+                android:textStyle="bold"
+                android:textColor="?android:attr/textColorPrimary" />
+
+            <TextView
+                android:id="@+id/tv_normal_guide"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:padding="12dp"
+                android:background="#14888888"
+                android:textSize="13sp"
+                android:textColor="?android:attr/textColorPrimary" />
+
+            <Button
+                android:id="@+id/btn_open_app_settings"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="打开系统的应用设置" />
+        </LinearLayout>
+
+        <!-- ============ 运行状态 ============ -->
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="20dp"
+            android:background="#1F888888" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="运行状态"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:textColor="?android:attr/textColorPrimary" />
+
+        <TextView
+            android:id="@+id/tv_guard_status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:textSize="13sp"
+            android:textColor="?android:attr/textColorSecondary" />
+
+        <Button
+            android:id="@+id/btn_view_log"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="查看守护日志" />
+
+        <!-- ============ 自动化权限 ============ -->
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="20dp"
+            android:background="#1F888888" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="自动化权限（由 Root 守护执行）"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:textColor="?android:attr/textColorPrimary" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:textSize="12sp"
+            android:textColor="?android:attr/textColorSecondary"
+            android:text="选择每项权限希望被设成什么状态，守护会在开机和运行时自动执行；选「不干预」则完全不碰。" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:text="显示悬浮窗"
+            android:textSize="14sp"
+            android:textColor="?android:attr/textColorPrimary" />
+
+        <Spinner
+            android:id="@+id/sp_auto_overlay"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp" />
+
+        <TextView
+            android:id="@+id/tv_auto_overlay_hint"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="12sp"
+            android:textColor="?android:attr/textColorSecondary" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:text="后台弹出界面"
+            android:textSize="14sp"
+            android:textColor="?android:attr/textColorPrimary" />
+
+        <Spinner
+            android:id="@+id/sp_auto_bg_popup"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp" />
+
+        <TextView
+            android:id="@+id/tv_auto_bg_popup_hint"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="12sp"
+            android:textColor="?android:attr/textColorSecondary"
+            android:text="HyperOS 专有。若本机不支持自动设置，用下面的按钮手动开一次。" />
+
+        <Button
+            android:id="@+id/btn_auto_bg_popup_manual"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="手动设置「后台弹出界面」" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:text="电池优化白名单"
+            android:textSize="14sp"
+            android:textColor="?android:attr/textColorPrimary" />
+
+        <Spinner
+            android:id="@+id/sp_auto_battery"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:text="通知权限（记账提示用系统通知时需要）"
+            android:textSize="14sp"
+            android:textColor="?android:attr/textColorPrimary" />
+
+        <Spinner
+            android:id="@+id/sp_auto_notification"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp" />
+
+        <Button
+            android:id="@+id/btn_auto_apply"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="立即应用权限设置" />
+
+        <TextView
+            android:id="@+id/tv_auto_result"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:textSize="12sp"
+            android:textColor="?android:attr/textColorSecondary" />
+
+        <CheckBox
+            android:id="@+id/cb_nag_overlay_disabled"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="不再提示「开启悬浮窗权限」" />
+
+        <!-- ============ 后台记账提示 ============ -->
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="22dp"
+            android:background="#1A000000" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="静默记账与提示"
+            android:textSize="15sp"
+            android:textStyle="bold"
+            android:textColor="?android:attr/textColorPrimary" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:textSize="12sp"
+            android:textColor="?android:attr/textColorSecondary"
+            android:text="关掉「显示悬浮窗」权限后，记账是全静默的，你看不到任何反馈。打开这一项会在屏幕顶部显示一张小卡片（不挡操作、4 秒自动消失），上面有金额和时间，可以撤销，也可以点进 App 核对。" />
+
+        <androidx.appcompat.widget.SwitchCompat
+            android:id="@+id/sw_silent_record"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="静默记账（不弹「记一笔」确认框）" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:textSize="12sp"
+            android:textColor="?android:attr/textColorSecondary"
+            android:text="开启后记账不再弹出确认框，直接入账。注意：要看到下面的提示卡片，必须保留「显示悬浮窗」权限（把上面自动化权限里的悬浮窗设为「允许」，或手动打开）。" />
+
+        <TextView
+            android:id="@+id/tv_overlay_check"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:textSize="12sp"
+            android:textColor="?android:attr/textColorSecondary"
+            android:text="" />
+
+        <Button
+            android:id="@+id/btn_fix_overlay"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:text="检查 / 修复「显示在其他应用上层」权限" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="记账提示方式"
+            android:textSize="15sp"
+            android:textStyle="bold"
+            android:textColor="?android:attr/textColorPrimary" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:textSize="12sp"
+            android:textColor="?android:attr/textColorSecondary"
+            android:text="有些手机（小米/HyperOS 等）和支付页面会拦截第三方悬浮卡片，导致卡片加进去了却看不见。系统通知由系统 UI 渲染，不受这类拦截影响，同样以横幅形式出现在屏幕顶部，也支持撤销和点击跳转。被拦截时请选「系统通知」。" />
+
+        <Spinner
+            android:id="@+id/sp_notify_style"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp" />
+
+        <TextView
+            android:id="@+id/tv_notify_style_hint"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:textSize="12sp"
+            android:textColor="?android:attr/textColorSecondary" />
+
+        <Button
+            android:id="@+id/btn_test_toast"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="测试提示卡片" />
+
+        <androidx.appcompat.widget.SwitchCompat
+            android:id="@+id/sw_bg_toast"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="显示后台记账提示卡片" />
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="24dp" />
+    </LinearLayout>
+</ScrollView>

@@ -1,0 +1,6 @@
+id=tally_a11y_guard
+name=Tally A11y Guard
+version=v1.4.2
+versionCode=10402
+author=muziyaa
+description=Keeps Tally's accessibility service bound so auto-recording survives ROM cleanups. Poll-based, no wakelocks, no OOM-adj tampering. Never clobbers other accessibility services.

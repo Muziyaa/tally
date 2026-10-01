@@ -70,7 +70,9 @@ public class AssistantConfig {
 
     // --- 自动记账总开关 ---
     public boolean isEnabled() {
-        return prefs.getBoolean(KEY_ENABLE, false);
+        // 默认开启：这个开关是自动记账的总闸，默认关着的话，全新安装后用户
+        // 不主动去「记账助手设置」里打开，就一笔都记不上，且没有任何提示。
+        return prefs.getBoolean(KEY_ENABLE, true);
     }
 
     public void setEnabled(boolean enabled) {
