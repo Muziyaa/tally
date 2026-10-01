@@ -1,3 +1,4 @@
+import java.io.File
 import java.util.Properties
 
 plugins {
@@ -13,6 +14,20 @@ plugins {
 val keystorePropsFile = rootProject.file("keystore.properties")
 val keystoreProps = Properties().apply {
     if (keystorePropsFile.exists()) keystorePropsFile.inputStream().use { load(it) }
+}
+
+// 有没有可用的签名密钥。没有就不把 signingConfig 挂到 release 上，
+// 让它产出未签名 APK，而不是整个构建失败（CI 上密钥出问题时还能拿到产物）。
+val releaseKeystore: java.io.File? = run {
+    val fromProps = if (keystoreProps.isNotEmpty()) keystoreProps.getProperty("storeFile") else null
+    val fromEnv = System.getenv("TALLY_KEYSTORE_FILE")
+    val candidate = when {
+        !fromProps.isNullOrBlank() -> file(fromProps)
+        !fromEnv.isNullOrBlank() -> file(fromEnv)
+        else -> file(System.getProperty("user.home") + "/.android/debug.keystore")
+    }
+    if (candidate.exists()) candidate.also { logger.lifecycle("[signing] release 将使用密钥: " + it.absolutePath) }
+    else null.also { logger.lifecycle("[signing] 找不到密钥文件，release 将不签名: " + candidate) }
 }
 
 android {
@@ -31,27 +46,18 @@ android {
 
     signingConfigs {
         create("release") {
-            // 三级来源，优先级从高到低：
-            //   1) keystore.properties（本机开发，已被 .gitignore 忽略）
-            //   2) 环境变量 TALLY_KEYSTORE_*（CI 用，值来自 GitHub Secrets）
-            //   3) 本机 debug 密钥（兜底；当前设备装的就是它签的，换密钥会导致
-            //      覆盖安装失败、必须卸载重装丢数据）
-            val envStore = System.getenv("TALLY_KEYSTORE_FILE")
-            when {
-                keystoreProps.isNotEmpty() -> {
-                    storeFile = file(keystoreProps.getProperty("storeFile"))
+            val ks = releaseKeystore
+            if (ks != null) {
+                storeFile = ks
+                if (keystoreProps.isNotEmpty()) {
                     storePassword = keystoreProps.getProperty("storePassword")
                     keyAlias = keystoreProps.getProperty("keyAlias")
                     keyPassword = keystoreProps.getProperty("keyPassword")
-                }
-                !envStore.isNullOrBlank() -> {
-                    storeFile = file(envStore)
+                } else if (!System.getenv("TALLY_KEYSTORE_FILE").isNullOrBlank()) {
                     storePassword = System.getenv("TALLY_KEYSTORE_PASSWORD")
                     keyAlias = System.getenv("TALLY_KEY_ALIAS")
                     keyPassword = System.getenv("TALLY_KEY_PASSWORD")
-                }
-                else -> {
-                    storeFile = file(System.getProperty("user.home") + "/.android/debug.keystore")
+                } else {
                     storePassword = "android"
                     keyAlias = "androiddebugkey"
                     keyPassword = "android"
@@ -62,7 +68,9 @@ android {
 
     buildTypes {
         release {
-            signingConfig = signingConfigs.getByName("release")
+            if (releaseKeystore != null) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

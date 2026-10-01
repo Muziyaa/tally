@@ -4,8 +4,7 @@ name: Release
 #
 #   git tag 3.9.0 && git push origin 3.9.0
 #
-# 需要在仓库 Settings → Secrets and variables → Actions 里配置四个 secret
-# （不配也能跑，只是产出的 APK 未签名，仅供检查）：
+# 需要在仓库 Settings → Secrets and variables → Actions 里配置四个 secret：
 #
 #   KEYSTORE_BASE64      密钥库文件的 base64（本机 debug 密钥即可，
 #                        换新密钥会导致已安装版本无法覆盖升级）
@@ -14,7 +13,7 @@ name: Release
 #   KEY_PASSWORD         密钥口令
 #
 # 生成 KEYSTORE_BASE64：
-#   base64 -i ~/.android/debug.keystore | pbcopy
+#   base64 -i ~/.android/debug.keystore | tr -d '\n' | pbcopy
 
 on:
   push:
@@ -50,14 +49,40 @@ jobs:
         id: keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
         run: |
-          if [ -z "$KEYSTORE_BASE64" ]; then
-            echo "没有配置 KEYSTORE_BASE64，本次产出未签名 APK（仅供检查，不能直接安装）"
+          set -u
+          if [ -z "${KEYSTORE_BASE64:-}" ]; then
+            echo "未配置 KEYSTORE_BASE64 —— 本次产出未签名 APK"
             echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "ksinfo=未配置 KEYSTORE_BASE64" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+          # 粘贴过程常常带进换行或空格，全部去掉再解码
+          printf '%s' "$KEYSTORE_BASE64" | tr -d ' \t\r\n' | base64 -d > "$RUNNER_TEMP/release.keystore"
+          SIZE=$(stat -c%s "$RUNNER_TEMP/release.keystore")
+          echo "密钥文件大小: $SIZE 字节"
+          if [ "$SIZE" -lt 100 ]; then
+            echo "::error::密钥解码结果过小（$SIZE 字节），KEYSTORE_BASE64 可能不完整"
+            echo "ksinfo=解码后仅 $SIZE 字节，内容不完整" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          # 用 keytool 验一下密钥库确实可读，别带着坏密钥去构建
+          if ! keytool -list -keystore "$RUNNER_TEMP/release.keystore" \
+                 -storepass "$KEYSTORE_PASSWORD" >/dev/null 2>&1; then
+            echo "::error::密钥库无法用给定口令打开，检查 KEYSTORE_PASSWORD"
+            echo "ksinfo=密钥库无法打开（口令不对？）" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          # -J-Duser.language=en 固定英文输出；sed 只吃第一个冒号，否则贪婪匹配
+          # 会把指纹里的冒号也吃掉，只剩最后两位。
+          FP=$(keytool -J-Duser.language=en -list -v -keystore "$RUNNER_TEMP/release.keystore" \
+                 -storepass "$KEYSTORE_PASSWORD" 2>/dev/null \
+               | grep -iE '^[[:space:]]*SHA-?256:' | head -1 \
+               | sed 's/^[^:]*:[[:space:]]*//' | tr -d ':' | tr 'A-Z' 'a-z')
+          echo "密钥指纹: $FP"
           echo "signed=true" >> "$GITHUB_OUTPUT"
+          echo "ksinfo=已加载密钥，指纹 ${FP:0:16}…" >> "$GITHUB_OUTPUT"
 
       - name: 编译正式版
         env:
@@ -67,27 +92,52 @@ jobs:
           TALLY_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           chmod +x gradlew
-          ./gradlew :app:assembleRelease --no-daemon
+          ./gradlew :app:assembleRelease --no-daemon --stacktrace
+          echo "--- 构建产物 ---"
+          ls -lh app/build/outputs/apk/release/
 
       - name: 整理产物
+        id: collect
         run: |
+          set -eu
           mkdir -p out
-          cp app/build/outputs/apk/release/app-release*.apk \
-             "out/Tally-${{ github.ref_name }}.apk" 2>/dev/null || \
-          cp app/build/outputs/apk/release/*.apk "out/Tally-${{ github.ref_name }}.apk"
-          cp tally-a11y-guard/tally-a11y-guard-*.zip out/ 2>/dev/null || true
+          APK=$(ls app/build/outputs/apk/release/*.apk | head -1)
+          cp "$APK" "out/Tally-${{ github.ref_name }}.apk"
+          for z in tally-a11y-guard/tally-a11y-guard-*.zip; do
+            [ -f "$z" ] && cp "$z" out/
+          done
+          echo "--- 待上传 ---"
           ls -lh out
+          echo "files=$(ls out | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+
+      - name: 留存构建产物（即使发布步骤出问题也能取到）
+        uses: actions/upload-artifact@v4
+        with:
+          name: Tally-${{ github.ref_name }}
+          path: out/*
+          if-no-files-found: error
+
+      - name: 组装 Release 说明
+        id: notes
+        run: |
+          {
+            echo "**安装包**：\`Tally-${{ github.ref_name }}.apk\`"
+            echo ""
+            echo "**保活模块**（可选，需要 Root/Magisk）：\`tally-a11y-guard-*.zip\`"
+            echo "在 Magisk 里「从本地安装」，装完**必须重启一次**。"
+            echo ""
+            echo "升级安装可直接覆盖，数据不会丢（请使用同一签名密钥构建的包）。"
+            echo ""
+            echo "---"
+            echo "<sub>构建诊断：ref=\`${{ github.ref_name }}\` · tag=\`${{ github.ref }}\` · "
+            echo "签名=${{ steps.keystore.outputs.signed }}（${{ steps.keystore.outputs.ksinfo }}） · "
+            echo "产物=\`${{ steps.collect.outputs.files }}\`</sub>"
+          } > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md"
 
       - name: 创建 Release
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ github.ref_name }}
-          generate_release_notes: true
+          body_path: ${{ runner.temp }}/notes.md
           files: out/*
-          body: |
-            **安装包**：`Tally-${{ github.ref_name }}.apk`
-
-            **保活模块**（可选，需要 Root/Magisk）：`tally-a11y-guard-*.zip`
-            —— 在 Magisk 里「从本地安装」，装完**必须重启一次**。
-
-            升级安装可直接覆盖，数据不会丢（请使用同一签名密钥构建的包）。
