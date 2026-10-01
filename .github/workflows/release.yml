@@ -51,38 +51,54 @@ jobs:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
         run: |
-          set -u
-          if [ -z "${KEYSTORE_BASE64:-}" ]; then
-            echo "未配置 KEYSTORE_BASE64 —— 本次产出未签名 APK"
+          # 不启用 -e：每一步的退出码自己处理，避免 die 在没有任何信息的地方。
+          # ::notice:: 会变成 annotation —— 不登录也能通过公开 API 读到，
+          # 是排查这类"步骤失败但看不到日志"最方便的通道。
+          raw_len=${#KEYSTORE_BASE64}
+          echo "::notice::KEYSTORE_BASE64 原始长度=$raw_len"
+          if [ "$raw_len" -eq 0 ]; then
+            echo "::warning::没有配置 KEYSTORE_BASE64，本次产出未签名 APK"
             echo "signed=false" >> "$GITHUB_OUTPUT"
             echo "ksinfo=未配置 KEYSTORE_BASE64" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # 粘贴过程常常带进换行或空格，全部去掉再解码
-          printf '%s' "$KEYSTORE_BASE64" | tr -d ' \t\r\n' | base64 -d > "$RUNNER_TEMP/release.keystore"
-          SIZE=$(stat -c%s "$RUNNER_TEMP/release.keystore")
-          echo "密钥文件大小: $SIZE 字节"
+
+          CLEAN=$(printf '%s' "$KEYSTORE_BASE64" | tr -d ' \t\r\n')
+          echo "::notice::去空白后长度=${#CLEAN}，首 16 字符=$(printf '%s' "$CLEAN" | cut -c1-16)，末 16 字符=$(printf '%s' "$CLEAN" | rev | cut -c1-16 | rev)"
+
+          printf '%s' "$CLEAN" | base64 -d > "$RUNNER_TEMP/release.keystore" 2> "$RUNNER_TEMP/b64.err"
+          rc=$?
+          echo "::notice::base64 -d 退出码=$rc，stderr=$(cat "$RUNNER_TEMP/b64.err" 2>/dev/null | head -c 200)"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::base64 解码失败（退出码 $rc），KEYSTORE_BASE64 内容有问题"
+            echo "ksinfo=base64 解码失败" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          SIZE=$(wc -c < "$RUNNER_TEMP/release.keystore")
+          echo "::notice::解码后 $SIZE 字节"
           if [ "$SIZE" -lt 100 ]; then
-            echo "::error::密钥解码结果过小（$SIZE 字节），KEYSTORE_BASE64 可能不完整"
-            echo "ksinfo=解码后仅 $SIZE 字节，内容不完整" >> "$GITHUB_OUTPUT"
+            echo "::error::解码结果仅 $SIZE 字节，KEYSTORE_BASE64 不完整"
+            echo "ksinfo=解码仅 $SIZE 字节" >> "$GITHUB_OUTPUT"
             exit 1
           fi
-          # 用 keytool 验一下密钥库确实可读，别带着坏密钥去构建
-          if ! keytool -list -keystore "$RUNNER_TEMP/release.keystore" \
-                 -storepass "$KEYSTORE_PASSWORD" >/dev/null 2>&1; then
-            echo "::error::密钥库无法用给定口令打开，检查 KEYSTORE_PASSWORD"
-            echo "ksinfo=密钥库无法打开（口令不对？）" >> "$GITHUB_OUTPUT"
+
+          echo "::notice::开始校验密钥库，口令长度=${#KEYSTORE_PASSWORD}"
+          KT=$(keytool -J-Duser.language=en -list -v -keystore "$RUNNER_TEMP/release.keystore" \
+                 -storepass "$KEYSTORE_PASSWORD" 2>&1)
+          ktrc=$?
+          echo "::notice::keytool 退出码=$ktrc"
+          if [ "$ktrc" -ne 0 ]; then
+            echo "::error::密钥库打不开：$(printf '%s' "$KT" | head -c 300)"
+            echo "ksinfo=密钥库打不开（口令不对？）" >> "$GITHUB_OUTPUT"
             exit 1
           fi
-          # -J-Duser.language=en 固定英文输出；sed 只吃第一个冒号，否则贪婪匹配
-          # 会把指纹里的冒号也吃掉，只剩最后两位。
-          FP=$(keytool -J-Duser.language=en -list -v -keystore "$RUNNER_TEMP/release.keystore" \
-                 -storepass "$KEYSTORE_PASSWORD" 2>/dev/null \
-               | grep -iE '^[[:space:]]*SHA-?256:' | head -1 \
+
+          FP=$(printf '%s' "$KT" | grep -iE '^[[:space:]]*SHA-?256:' | head -1 \
                | sed 's/^[^:]*:[[:space:]]*//' | tr -d ':' | tr 'A-Z' 'a-z')
-          echo "密钥指纹: $FP"
+          echo "::notice::密钥指纹=${FP:0:24}"
           echo "signed=true" >> "$GITHUB_OUTPUT"
-          echo "ksinfo=已加载密钥，指纹 ${FP:0:16}…" >> "$GITHUB_OUTPUT"
+          echo "ksinfo=已加载密钥，指纹 ${FP:0:16}" >> "$GITHUB_OUTPUT"
 
       - name: 编译正式版
         env:
