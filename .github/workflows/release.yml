@@ -66,6 +66,14 @@ jobs:
           CLEAN=$(printf '%s' "$KEYSTORE_BASE64" | tr -d ' \t\r\n')
           echo "::notice::去空白后长度=${#CLEAN}，首 16 字符=$(printf '%s' "$CLEAN" | cut -c1-16)，末 16 字符=$(printf '%s' "$CLEAN" | rev | cut -c1-16 | rev)"
 
+          # base64 长度必须是 4 的倍数 —— 粘贴时丢一个字符就必然解码失败。
+          # 单独检查一下，好给出比 "exit code 1" 有用得多的提示。
+          if [ $(( ${#CLEAN} % 4 )) -ne 0 ]; then
+            echo "::error::KEYSTORE_BASE64 长度为 ${#CLEAN}，不是 4 的倍数 —— 粘贴时丢了字符（正确值应为 3492）"
+            echo "ksinfo=长度 ${#CLEAN} 非法（非 4 倍数）" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
           printf '%s' "$CLEAN" | base64 -d > "$RUNNER_TEMP/release.keystore" 2> "$RUNNER_TEMP/b64.err"
           rc=$?
           echo "::notice::base64 -d 退出码=$rc，stderr=$(cat "$RUNNER_TEMP/b64.err" 2>/dev/null | head -c 200)"
