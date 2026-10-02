@@ -47,7 +47,7 @@
 ## 项目结构
 
 ```
-app/app/src/main/java/com/example/budgetapp/
+app/src/main/java/com/example/budgetapp/
 ├── database/           # 数据库实体和 DAO
 │   ├── AppDatabase.java
 │   ├── Transaction.java
