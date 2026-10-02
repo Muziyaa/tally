@@ -1,12 +1,6 @@
 *.iml
 .gradle
 /local.properties
-/.idea/caches
-/.idea/libraries
-/.idea/modules.xml
-/.idea/workspace.xml
-/.idea/navEditor.xml
-/.idea/assetWizardSettings.xml
 .DS_Store
 /build
 /captures
@@ -27,3 +21,12 @@ keystore.properties
 *.apk
 *.aab
 app/build/
+
+# IDE 配置整体忽略。
+# 之前只忽略了 caches/libraries/workspace 等几个，导致
+# .idea/deploymentTargetSelector.xml 被提交 —— 里面有真实手机的
+# 设备序列号（identifier="serial=..."），属于不该外泄的信息。
+.idea/
+
+# 发布流程说明（只在本地保留，不公开）
+RELEASE-WORKFLOW.md
